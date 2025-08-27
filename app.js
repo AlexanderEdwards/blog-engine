@@ -3,6 +3,7 @@ const path = require('path');
 const { getPool, saveKV, getKV, deleteKV, listKeysByPrefix, logEvent } = require('./db');
 const { generateHTML } = require('./gpt');
 const { slugify } = require('./utils/slugify');
+const { ensureAdminUser, verifyPassword, getOrCreateSessionSecret, createSessionToken, verifySessionToken } = require('./utils/auth');
 
 const app = express();
 
@@ -23,13 +24,96 @@ function siteFromHost(hostname) {
 // Serve admin assets
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
+// Parse cookies minimal
+function parseCookies(req) {
+  const hdr = req.headers['cookie'];
+  if (!hdr) return {};
+  return hdr.split(';').map(v => v.trim()).reduce((acc, part) => {
+    const eq = part.indexOf('=');
+    if (eq === -1) return acc;
+    const k = decodeURIComponent(part.slice(0, eq));
+    const val = decodeURIComponent(part.slice(eq + 1));
+    acc[k] = val;
+    return acc;
+  }, {});
+}
+
+// Simple auth middleware using signed cookie
+async function requireAuth(req, res, next) {
+  try {
+    const cookies = parseCookies(req);
+    const token = cookies['auth'];
+    if (!token) return res.status(401).json({ ok: false, code: 'UNAUTHORIZED', message: 'Login required' });
+    const secret = await getOrCreateSessionSecret();
+    const payload = verifySessionToken(token, secret);
+    if (!payload || payload.sub !== 'edwardsalexk@gmail.com' || payload.exp < Date.now()) {
+      return res.status(401).json({ ok: false, code: 'UNAUTHORIZED', message: 'Invalid session' });
+    }
+    req.user = { email: payload.sub };
+    next();
+  } catch (_) {
+    return res.status(401).json({ ok: false, code: 'UNAUTHORIZED', message: 'Auth error' });
+  }
+}
+
+// Seed admin user credentials on boot
+(async () => {
+  try {
+    await ensureAdminUser({ email: 'edwardsalexk@gmail.com', password: 'vixen1993' });
+  } catch (err) {
+    // Swallow to avoid leaking details; log minimal event
+    try { await logEvent('admin_seed_error', { message: err.message }); } catch (_) {}
+  }
+})();
+
 // Admin UI
-app.get('/admin', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+app.get('/admin', async (req, res) => {
+  try {
+    const cookies = parseCookies(req);
+    const token = cookies['auth'];
+    const secret = await getOrCreateSessionSecret();
+    const payload = token ? verifySessionToken(token, secret) : null;
+    const valid = payload && payload.sub === 'edwardsalexk@gmail.com' && payload.exp > Date.now();
+    res.sendFile(path.join(__dirname, 'public', valid ? 'admin.html' : 'login.html'));
+  } catch (_) {
+    res.sendFile(path.join(__dirname, 'public', 'login.html'));
+  }
+});
+
+// Login endpoint
+app.post('/api/admin/login', async (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+    const email = String(username || '').trim().toLowerCase();
+    if (!email || !password) {
+      return res.status(400).json({ ok: false, code: 'INVALID_INPUT', message: 'Username and password required' });
+    }
+    if (email !== 'edwardsalexk@gmail.com') {
+      return res.status(401).json({ ok: false, code: 'UNAUTHORIZED', message: 'Invalid credentials' });
+    }
+    const ok = await verifyPassword(email, password);
+    if (!ok) return res.status(401).json({ ok: false, code: 'UNAUTHORIZED', message: 'Invalid credentials' });
+    const secret = await getOrCreateSessionSecret();
+    const token = createSessionToken({ sub: email, ttlMs: 1000 * 60 * 60 * 24 * 7 }, secret); // 7 days
+    const cookie = `auth=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax`;
+    res.setHeader('Set-Cookie', cookie);
+    await logEvent('admin_login', { email });
+    return res.json({ ok: true, message: 'Logged in' });
+  } catch (err) {
+    await logEvent('admin_login_error', { message: err.message });
+    return res.status(500).json({ ok: false, code: 'LOGIN_FAIL', message: 'Login failed', detail: err.message });
+  }
+});
+
+// Logout endpoint
+app.post('/api/admin/logout', async (req, res) => {
+  res.setHeader('Set-Cookie', 'auth=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax');
+  try { await logEvent('admin_logout', {}); } catch (_) {}
+  res.json({ ok: true, message: 'Logged out' });
 });
 
 // Admin API - list posts
-app.get('/api/admin/posts', async (req, res) => {
+app.get('/api/admin/posts', requireAuth, async (req, res) => {
   const site = siteFromHost(req.hostname);
   try {
     const prefix = `post:${site}:`;
@@ -55,7 +139,7 @@ app.get('/api/admin/posts', async (req, res) => {
 });
 
 // Admin API - get a post
-app.get('/api/admin/posts/:slug', async (req, res) => {
+app.get('/api/admin/posts/:slug', requireAuth, async (req, res) => {
   const site = siteFromHost(req.hostname);
   const slug = String(req.params.slug || '').toLowerCase();
   try {
@@ -70,7 +154,7 @@ app.get('/api/admin/posts/:slug', async (req, res) => {
 });
 
 // Admin API - create/update post
-app.post('/api/admin/posts', async (req, res) => {
+app.post('/api/admin/posts', requireAuth, async (req, res) => {
   const site = siteFromHost(req.hostname);
   const { title, content, images = [], slug: slugInput } = req.body || {};
 
@@ -112,7 +196,7 @@ app.post('/api/admin/posts', async (req, res) => {
 });
 
 // Admin API - delete post
-app.delete('/api/admin/posts/:slug', async (req, res) => {
+app.delete('/api/admin/posts/:slug', requireAuth, async (req, res) => {
   const site = siteFromHost(req.hostname);
   const slug = String(req.params.slug || '').toLowerCase();
   const key = `post:${site}:${slug}`;
@@ -199,4 +283,3 @@ app.listen(port, () => {
 });
 
 module.exports = app;
-

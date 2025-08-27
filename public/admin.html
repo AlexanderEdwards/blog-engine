@@ -24,6 +24,7 @@
       list.innerHTML = '<tr><td colspan="3">Loading…</td></tr>';
       try {
         const res = await fetch('/api/admin/posts');
+        if(res.status === 401){ location.href = '/admin'; return; }
         const data = await res.json();
         if(!data.ok) throw new Error(data.message||'Failed');
         if(!data.posts.length){
@@ -61,12 +62,17 @@
       if(d.ok){ msg.className='success'; msg.textContent='Saved'; e.target.reset(); loadPosts(); }
       else { msg.className='error'; msg.textContent = d.message + (d.detail ? ' – '+d.detail : ''); }
     }
+    async function logout(){
+      try { await fetch('/api/admin/logout', { method: 'POST' }); } catch(_){}
+      location.href = '/admin';
+    }
     window.addEventListener('DOMContentLoaded', ()=>{ loadPosts(); });
   </script>
 </head>
 <body>
   <main>
     <h1>Blog CMS</h1>
+    <p><button onclick="logout()">Log out</button></p>
     <p>Create posts for the current host/site. Generated HTML inherits the site CSS.</p>
 
     <div id="msg"></div>
@@ -101,4 +107,3 @@
   </main>
 </body>
 </html>
-
