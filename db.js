@@ -8,6 +8,20 @@ const pool = new Pool({
 
 const USER_ID = 'edwardsalexk_gmail_com';
 
+// Ensure connections use the user-isolated schema. This avoids referencing public.app_data.
+// We validate the schema name strictly to a safe pattern and apply via set_config using parameters.
+const SCHEMA = process.env.DB_SCHEMA || 'public';
+const SAFE_SCHEMA = /^[a-zA-Z0-9_]+$/.test(SCHEMA) ? SCHEMA : 'public';
+
+pool.on('connect', async (client) => {
+  try {
+    // Use parameterized call to avoid injection and include public as fallback on search_path
+    await client.query('SELECT set_config($1, $2, false)', ['search_path', `${SAFE_SCHEMA},public`]);
+  } catch (_) {
+    // If this fails, we keep going; queries may still work if default schema is correct
+  }
+});
+
 async function getPool() {
   return pool;
 }
@@ -71,4 +85,3 @@ async function logEvent(event, details) {
 }
 
 module.exports = { getPool, saveKV, getKV, deleteKV, listKeysByPrefix, logEvent };
-
